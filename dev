@@ -7,6 +7,9 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEV_SCRIPTS_DIR="$SCRIPT_DIR/scripts/dev-8317"
+DEV_RUNTIME_DIR="${CLIPROXY_DEV_RUNTIME_DIR:-$HOME/.local/share/cliproxyapi/dev-8317}"
+DEV_LABEL="local.cli-proxy-api-dev"
+DEV_DOMAIN="gui/$(id -u)"
 
 print_help() {
     cat << 'HELP'
@@ -50,15 +53,10 @@ case "${1:-help}" in
         ;;
     status)
         echo "=== CLIProxyAPI Dev (8317) Status ==="
-        if [ -f "$DEV_SCRIPTS_DIR/cliproxy-8317.pid" ]; then
-            PID=$(cat "$DEV_SCRIPTS_DIR/cliproxy-8317.pid")
-            if ps -p "$PID" >/dev/null 2>&1; then
-                echo "✅ Running (PID: $PID)"
-            else
-                echo "❌ Stale PID file"
-            fi
+        if launchctl print "$DEV_DOMAIN/$DEV_LABEL" >/dev/null 2>&1; then
+            echo "✅ LaunchAgent loaded"
         else
-            echo "❌ Not running"
+            echo "❌ LaunchAgent not loaded"
         fi
 
         if lsof -i :8317 -sTCP:LISTEN -n -P 2>/dev/null | grep -q LISTEN; then
@@ -68,7 +66,7 @@ case "${1:-help}" in
         fi
         ;;
     logs)
-        tail -f "$DEV_SCRIPTS_DIR/cliproxy-8317.log"
+        tail -f "$DEV_RUNTIME_DIR/launchd.log"
         ;;
     help|-h|--help)
         print_help

@@ -7,13 +7,12 @@ DEV_PORT="${CLIPROXY_DEV_PORT:-8317}"
 DEV_MANAGEMENT_KEY="${CLIPROXY_DEV_MANAGEMENT_KEY:-cliproxy-dev-local}"
 DEV_PROXY_HOST="${CLIPROXY_DEV_PROXY_HOST:-172.20.10.1}"
 DEV_PROXY_PORT="${CLIPROXY_DEV_PROXY_PORT:-3128}"
-RUNTIME_DIR="${CLIPROXY_DEV_RUNTIME_DIR:-/private/tmp/cliproxy-dev-8317}"
+RUNTIME_DIR="${CLIPROXY_DEV_RUNTIME_DIR:-$HOME/.local/share/cliproxyapi/dev-8317}"
 MAIN_CONF="/opt/homebrew/etc/cliproxyapi.conf"
 CONFIG_FILE="$RUNTIME_DIR/config-8317.yaml"
 BINARY="$RUNTIME_DIR/cliproxyapi-dev"
 RUNNER="$RUNTIME_DIR/run.sh"
 PLIST_NAME="local.cli-proxy-api-dev.plist"
-SOURCE_PLIST="$DEV_DIR/$PLIST_NAME"
 TARGET_PLIST="$HOME/Library/LaunchAgents/$PLIST_NAME"
 LABEL="local.cli-proxy-api-dev"
 DOMAIN="gui/$(id -u)"
@@ -83,7 +82,37 @@ chmod 755 "$RUNNER"
 
 echo "=== Installing launch agent for ${DEV_PORT} ==="
 mkdir -p "$HOME/Library/LaunchAgents"
-cp "$SOURCE_PLIST" "$TARGET_PLIST"
+cat > "$TARGET_PLIST" << PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$LABEL</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>$RUNNER</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>WorkingDirectory</key>
+    <string>$RUNTIME_DIR</string>
+
+    <key>StandardOutPath</key>
+    <string>$RUNTIME_DIR/launchd.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>$RUNTIME_DIR/launchd.log</string>
+</dict>
+</plist>
+PLIST_EOF
 
 launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
 launchctl bootstrap "$DOMAIN" "$TARGET_PLIST"
@@ -91,8 +120,9 @@ launchctl enable "$DOMAIN/$LABEL" 2>/dev/null || true
 launchctl kickstart -k "$DOMAIN/$LABEL"
 
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-  if curl -s --max-time 2 "http://127.0.0.1:${DEV_PORT}/management.html" -o /dev/null -w "%{http_code}" | grep -q "200"; then
-    echo "✅ ${DEV_PORT} started: http://127.0.0.1:${DEV_PORT}/management.html"
+  if curl -s --noproxy '*' --max-time 2 "http://localhost:${DEV_PORT}/management.html" -o /dev/null -w "%{http_code}" | grep -q "200" ||
+    lsof -i :"${DEV_PORT}" -sTCP:LISTEN -n -P 2>/dev/null | grep -q LISTEN; then
+    echo "✅ ${DEV_PORT} started: http://localhost:${DEV_PORT}/management.html"
     exit 0
   fi
   sleep 1

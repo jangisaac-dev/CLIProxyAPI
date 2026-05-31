@@ -7,7 +7,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/private/tmp/cliproxy-dev-8317/run.sh</string>
+        <string>/Users/isaacjang/.local/share/cliproxyapi/dev-8317/run.sh</string>
     </array>
 
     <key>RunAtLoad</key>
@@ -17,12 +17,12 @@
     <true/>
 
     <key>WorkingDirectory</key>
-    <string>/Users/isaacjang/Documents/simple_tools/CLIProxyAPI</string>
+    <string>/Users/isaacjang/.local/share/cliproxyapi/dev-8317</string>
 
     <key>StandardOutPath</key>
-    <string>/private/tmp/cliproxy-dev-8317/launchd.log</string>
+    <string>/Users/isaacjang/.local/share/cliproxyapi/dev-8317/launchd.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/private/tmp/cliproxy-dev-8317/launchd.log</string>
+    <string>/Users/isaacjang/.local/share/cliproxyapi/dev-8317/launchd.log</string>
 </dict>
 </plist>
