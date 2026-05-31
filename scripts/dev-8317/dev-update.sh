@@ -6,6 +6,16 @@ UPSTREAM_REMOTE="${CLIPROXY_UPSTREAM_REMOTE:-upstream}"
 
 cd "$REPO_ROOT"
 
+git_fetch() {
+  if [ "${CLIPROXY_UPDATE_USE_PROXY:-0}" = "1" ]; then
+    git fetch "$@"
+    return
+  fi
+
+  env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
+    git -c http.proxy= -c https.proxy= fetch "$@"
+}
+
 echo "=== Updating feature branch with latest upstream ==="
 CURRENT=$(git branch --show-current)
 
@@ -20,10 +30,10 @@ if [ "$CURRENT" != "$BRANCH" ]; then
 fi
 
 if git remote get-url "$UPSTREAM_REMOTE" >/dev/null 2>&1; then
-  git fetch "$UPSTREAM_REMOTE"
+  git_fetch "$UPSTREAM_REMOTE"
   git rebase "$UPSTREAM_REMOTE/main"
 else
-  git fetch origin
+  git_fetch origin
   git rebase origin/main
 fi
 
