@@ -4,10 +4,25 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import (
+	"fmt"
+	"net/url"
+	"strings"
+)
+
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
+	// This is the effective value used at runtime. It is kept in sync with ProxySettings when
+	// the structured settings are updated via management API.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
+
+	// ProxySettings provides a structured way to configure the global outbound proxy
+	// (protocol, host, port, credentials) with an enabled flag. This is primarily
+	// controlled via the management API (/v0/management/config/proxy-settings) so that
+	// on/off and different proxy types (http/https/socks5) can be toggled at runtime
+	// from Web-UI or external shortcuts without editing the file manually.
+	ProxySettings ProxySettings `yaml:"proxy-settings,omitempty" json:"proxy-settings,omitempty"`
 
 	// DisableImageGeneration controls whether the built-in image_generation tool is injected/allowed.
 	//
@@ -63,4 +78,63 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+}
+
+// ProxySettings holds structured global proxy configuration.
+// It supports on/off toggle and common protocols (http, https, socks5, socks5h).
+// The management API can update this fully or partially (e.g. only toggle enabled,
+// or only change host+port). After update the effective ProxyURL string is
+// recomputed so that all runtime code paths (including the recently fixed uTLS
+// Claude paths) immediately see the change.
+type ProxySettings struct {
+	Enabled  bool   `yaml:"enabled" json:"enabled"`
+	Protocol string `yaml:"protocol,omitempty" json:"protocol,omitempty"` // "http", "https", "socks5", "socks5h"
+	Host     string `yaml:"host,omitempty" json:"host,omitempty"`
+	Port     int    `yaml:"port,omitempty" json:"port,omitempty"`
+	Username string `yaml:"username,omitempty" json:"username,omitempty"`
+	Password string `yaml:"password,omitempty" json:"password,omitempty"`
+}
+
+// EffectiveProxyURL returns the proxy URL string that should be used at runtime,
+// computed from ProxySettings if it is enabled, otherwise falling back to the
+// legacy ProxyURL field. When ProxySettings is enabled=false we return "direct"
+// so that no proxy (not even environment proxies) is used — matching the
+// documented semantics of the "direct" value.
+func (s *SDKConfig) EffectiveProxyURL() string {
+	ps := s.ProxySettings
+	if ps.Enabled {
+		if ps.Host == "" {
+			return ""
+		}
+		protocol := strings.ToLower(strings.TrimSpace(ps.Protocol))
+		if protocol == "" {
+			protocol = "http"
+		}
+		var auth string
+		if ps.Username != "" {
+			if ps.Password != "" {
+				auth = url.QueryEscape(ps.Username) + ":" + url.QueryEscape(ps.Password) + "@"
+			} else {
+				auth = url.QueryEscape(ps.Username) + "@"
+			}
+		}
+		port := ps.Port
+		if port == 0 {
+			if protocol == "https" || protocol == "socks5h" {
+				port = 443
+			} else {
+				port = 1080 // common default for socks, 8080 for http is also common but we pick a reasonable one
+				if protocol == "http" || protocol == "https" {
+					port = 8080
+				}
+			}
+		}
+		return fmt.Sprintf("%s://%s%s:%d", protocol, auth, ps.Host, port)
+	}
+	// When structured settings are present but disabled, force direct.
+	// If no structured settings, fall back to the legacy plain ProxyURL string.
+	if ps.Host != "" || ps.Protocol != "" {
+		return "direct"
+	}
+	return s.ProxyURL
 }

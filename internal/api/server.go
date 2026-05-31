@@ -586,6 +586,14 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/proxy-url", s.mgmt.PutProxyURL)
 		mgmt.DELETE("/proxy-url", s.mgmt.DeleteProxyURL)
 
+		// Structured global proxy settings (with enabled flag + protocol/http/https/socks5 + credentials).
+		// Supports full updates (PUT) and partial updates e.g. only {"enabled": false} or only host/port (PATCH).
+		// After change the effective proxy-url string is recomputed so runtime (including Claude/uTLS) sees it immediately.
+		// External shortcuts and Web-UI can use these endpoints.
+		mgmt.GET("/proxy-settings", s.mgmt.GetProxySettings)
+		mgmt.PUT("/proxy-settings", s.mgmt.PutProxySettings)
+		mgmt.PATCH("/proxy-settings", s.mgmt.PatchProxySettings)
+
 		mgmt.POST("/api-call", s.mgmt.APICall)
 
 		mgmt.GET("/quota-exceeded/switch-project", s.mgmt.GetSwitchProject)

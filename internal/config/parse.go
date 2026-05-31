@@ -85,5 +85,11 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.SanitizeOAuthModelAlias()
 	cfg.SanitizePayloadRules()
 
+	// Sync effective proxy string from structured ProxySettings (if present)
+	// so that all runtime code paths see a consistent ProxyURL value.
+	if cfg.ProxySettings.Enabled || cfg.ProxySettings.Host != "" || cfg.ProxySettings.Protocol != "" {
+		cfg.ProxyURL = cfg.EffectiveProxyURL()
+	}
+
 	return &cfg, nil
 }
