@@ -72,6 +72,16 @@ CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
 
+## Local Dev Proxy Management
+
+This branch includes a macOS local development workflow for the 8317 management
+service, LaunchAgent startup, proxy on/off helpers, and upstream update/upgrade
+commands. See [docs/local-dev-proxy-management.md](docs/local-dev-proxy-management.md).
+
+For the external Codex OAuth page, the current `cpa.ioq.kr` Cloudflare Tunnel
+runtime, and the legacy DuckDNS/TLS checklist, see
+[docs/public-codex-oauth-duckdns.md](docs/public-codex-oauth-duckdns.md).
+
 ## Usage Statistics
 
 Since v6.10.0, CLIProxyAPI and [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) no longer ship built-in usage statistics. If you need usage statistics, use:

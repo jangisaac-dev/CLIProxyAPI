@@ -49,6 +49,80 @@ import (
 
 const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window will close automatically in 5 seconds.</p></body></html>`
 
+const publicCodexOAuthHTML = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codex OAuth</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#f8fafc;color:#111827}
+    main{width:min(440px,calc(100vw - 32px));text-align:center}
+    .code{font-size:32px;font-weight:800;letter-spacing:2px;margin:16px 0;padding:14px;border:1px solid #d1d5db;border-radius:8px;background:#fff}
+    .actions{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+    a,button{display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 18px;border-radius:8px;border:0;background:#111827;color:#fff;text-decoration:none;font:inherit;font-weight:600;cursor:pointer}
+    button{background:#2563eb}
+    p{color:#4b5563}
+    .error{color:#b91c1c}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Codex OAuth</h1>
+    <p id="status">Preparing device authentication.</p>
+    <div id="code" class="code" hidden></div>
+    <div class="actions">
+      <button id="copy" type="button" hidden>Copy code</button>
+      <a id="continue" href="https://auth.openai.com/codex/device" hidden>Continue</a>
+    </div>
+  </main>
+  <script>
+    (async function(){
+      const status = document.getElementById("status");
+      const code = document.getElementById("code");
+      const link = document.getElementById("continue");
+      const copy = document.getElementById("copy");
+      async function copyCode(){
+        const value = code.textContent.trim();
+        if (!value) return;
+        try {
+          await navigator.clipboard.writeText(value);
+        } catch (err) {
+          const input = document.createElement("textarea");
+          input.value = value;
+          input.setAttribute("readonly", "");
+          input.style.position = "fixed";
+          input.style.opacity = "0";
+          document.body.appendChild(input);
+          input.select();
+          document.execCommand("copy");
+          document.body.removeChild(input);
+        }
+        copy.textContent = "Copied";
+        setTimeout(function(){ copy.textContent = "Copy code"; }, 1600);
+      }
+      copy.addEventListener("click", copyCode);
+      try {
+        const response = await fetch("/codex/oauth/device/start", { method: "POST" });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "Failed to start authentication");
+        code.textContent = payload.user_code;
+        code.hidden = false;
+        copy.hidden = false;
+        const target = payload.verification_url_complete || payload.verification_url;
+        link.href = target;
+        link.hidden = false;
+        status.textContent = "Redirecting to OpenAI. Use this code if prompted.";
+        setTimeout(function(){ window.location.assign(target); }, 1200);
+      } catch (err) {
+        status.className = "error";
+        status.textContent = err && err.message ? err.message : "Authentication setup failed.";
+      }
+    })();
+  </script>
+</body>
+</html>`
+
 type serverOptionConfig struct {
 	extraMiddleware      []gin.HandlerFunc
 	engineConfigurator   func(*gin.Engine)
@@ -357,6 +431,28 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 	}
 }
 
+func requestPublicBaseURL(c *gin.Context) string {
+	if c == nil || c.Request == nil {
+		return ""
+	}
+	scheme := "http"
+	if forwardedProto := strings.TrimSpace(c.GetHeader("X-Forwarded-Proto")); forwardedProto != "" {
+		scheme = strings.TrimSpace(strings.Split(forwardedProto, ",")[0])
+	} else if c.Request.TLS != nil {
+		scheme = "https"
+	}
+	host := strings.TrimSpace(c.GetHeader("X-Forwarded-Host"))
+	if host != "" {
+		host = strings.TrimSpace(strings.Split(host, ",")[0])
+	} else {
+		host = strings.TrimSpace(c.Request.Host)
+	}
+	if scheme == "" || host == "" {
+		return ""
+	}
+	return scheme + "://" + host
+}
+
 // setupRoutes configures the API routes for the server.
 // It defines the endpoints and associates them with their respective handlers.
 func (s *Server) setupRoutes() {
@@ -433,6 +529,40 @@ func (s *Server) setupRoutes() {
 	// OAuth callback endpoints (reuse main server port)
 	// These endpoints receive provider redirects and persist
 	// the short-lived code/state for the waiting goroutine.
+	s.engine.GET("/codex/oauth", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(publicCodexOAuthHTML))
+	})
+	s.engine.GET("/codex/auth", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(publicCodexOAuthHTML))
+	})
+	s.engine.GET("/codex/oauth/start", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(publicCodexOAuthHTML))
+	})
+	s.engine.POST("/codex/oauth/device/start", func(c *gin.Context) {
+		if s.mgmt == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "management handler unavailable"})
+			return
+		}
+		s.mgmt.StartPublicCodexDeviceOAuth(c)
+	})
+	s.engine.GET("/codex/login/:state", func(c *gin.Context) {
+		state := strings.TrimSpace(c.Param("state"))
+		if err := managementHandlers.ValidateOAuthState(state); err != nil {
+			c.AbortWithStatus(http.StatusNotFound)
+			return
+		}
+		authURL, ok := managementHandlers.GetOAuthSessionAuthURL(state, "codex")
+		if !ok {
+			c.AbortWithStatus(http.StatusNotFound)
+			return
+		}
+		c.Header("Cache-Control", "no-store")
+		c.Redirect(http.StatusFound, authURL)
+	})
+
 	s.engine.GET("/anthropic/callback", func(c *gin.Context) {
 		code := c.Query("code")
 		state := c.Query("state")
@@ -585,6 +715,19 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/proxy-url", s.mgmt.PutProxyURL)
 		mgmt.PATCH("/proxy-url", s.mgmt.PutProxyURL)
 		mgmt.DELETE("/proxy-url", s.mgmt.DeleteProxyURL)
+
+		mgmt.GET("/duckdns", s.mgmt.GetDuckDNS)
+		mgmt.GET("/duckdns/public-ip", s.mgmt.GetDuckDNSPublicIP)
+		mgmt.PATCH("/duckdns", s.mgmt.PatchDuckDNS)
+		mgmt.POST("/duckdns/update", s.mgmt.UpdateDuckDNS)
+
+		// Structured global proxy settings (with enabled flag + protocol/http/https/socks5 + credentials).
+		// Supports full updates (PUT) and partial updates e.g. only {"enabled": false} or only host/port (PATCH).
+		// After change the effective proxy-url string is recomputed so runtime (including Claude/uTLS) sees it immediately.
+		// External shortcuts and Web-UI can use these endpoints.
+		mgmt.GET("/proxy-settings", s.mgmt.GetProxySettings)
+		mgmt.PUT("/proxy-settings", s.mgmt.PutProxySettings)
+		mgmt.PATCH("/proxy-settings", s.mgmt.PatchProxySettings)
 
 		mgmt.POST("/api-call", s.mgmt.APICall)
 
@@ -755,7 +898,15 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		}
 	}
 
-	c.File(filePath)
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		log.WithError(err).Error("failed to read management control panel asset")
+		c.File(filePath)
+		return
+	}
+
+	c.Header("Cache-Control", "no-store")
+	c.Data(http.StatusOK, "text/html; charset=utf-8", injectDuckDNSManagementPanel(data))
 }
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {
@@ -1212,8 +1363,7 @@ func (s *Server) Start() error {
 		if errHTTP2 := http2.ConfigureServer(s.server, &http2.Server{}); errHTTP2 != nil {
 			log.Warnf("failed to configure HTTP/2: %v", errHTTP2)
 		}
-		listener = tls.NewListener(listener, tlsConfig)
-		log.Debugf("Starting API server on %s with TLS", addr)
+		log.Debugf("Starting API server on %s with HTTP/TLS multiplexing", addr)
 	} else {
 		log.Debugf("Starting API server on %s", addr)
 	}

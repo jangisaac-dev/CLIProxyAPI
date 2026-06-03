@@ -12,6 +12,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -42,12 +43,27 @@ import (
 
 var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"}
 
+var (
+	startCodexDeviceFlow = sdkAuth.StartCodexDeviceFlow
+	pollCodexDeviceFlow  = sdkAuth.PollCodexDeviceFlow
+
+	publicCodexDeviceStartMu sync.Mutex
+	publicCodexDeviceMu      sync.Mutex
+	publicCodexDeviceCurrent *publicCodexDeviceOAuthState
+	publicCodexDeviceBackoff time.Time
+)
+
 const (
 	anthropicCallbackPort = 54545
 	geminiCallbackPort    = 8085
 	codexCallbackPort     = 1455
 	geminiCLIEndpoint     = "https://cloudcode-pa.googleapis.com"
 	geminiCLIVersion      = "v1internal"
+
+	publicCodexDeviceFlowTTL          = 15 * time.Minute
+	publicCodexDeviceChallengeBackoff = 2 * time.Minute
+	publicCodexDeviceChallengeCode    = "codex_device_auth_challenge"
+	publicCodexDeviceChallengeMessage = "OpenAI is temporarily challenging device-code requests from this server network. Wait briefly or enable an outbound proxy, then retry."
 )
 
 type callbackForwarder struct {
@@ -234,6 +250,165 @@ func (h *Handler) managementCallbackURL(path string) (string, error) {
 		scheme = "https"
 	}
 	return fmt.Sprintf("%s://127.0.0.1:%d%s", scheme, h.cfg.Port, path), nil
+}
+
+func codexPublicBaseURL(c *gin.Context) (string, error) {
+	raw := strings.TrimSpace(c.Query("public_base_url"))
+	if raw == "" {
+		raw = strings.TrimSpace(c.Query("external_base_url"))
+	}
+	return parseCodexPublicBaseURL(raw)
+}
+
+func parseCodexPublicBaseURL(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid public_base_url: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("public_base_url must use http or https")
+	}
+	if strings.TrimSpace(u.Host) == "" {
+		return "", fmt.Errorf("public_base_url host is required")
+	}
+	u.Path = ""
+	u.RawQuery = ""
+	u.Fragment = ""
+	return strings.TrimRight(u.String(), "/"), nil
+}
+
+func joinPublicURL(base, path string) string {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return base + path
+}
+
+type codexOAuthStartResult struct {
+	URL         string
+	State       string
+	PublicURL   string
+	CallbackURL string
+}
+
+func (r *codexOAuthStartResult) response() gin.H {
+	resp := gin.H{"status": "ok", "url": r.URL, "state": r.State}
+	if r.PublicURL != "" {
+		resp["public_url"] = r.PublicURL
+		resp["callback_url"] = r.CallbackURL
+	}
+	return resp
+}
+
+type codexOAuthStartError struct {
+	status  int
+	message string
+}
+
+type publicCodexDeviceOAuthState struct {
+	state     string
+	flow      *sdkAuth.CodexDeviceFlow
+	expiresAt time.Time
+}
+
+func codexVerificationURLComplete(verificationURL, userCode string) string {
+	verificationURL = strings.TrimSpace(verificationURL)
+	userCode = strings.TrimSpace(userCode)
+	if verificationURL == "" || userCode == "" {
+		return verificationURL
+	}
+	u, err := url.Parse(verificationURL)
+	if err != nil {
+		return verificationURL
+	}
+	q := u.Query()
+	q.Set("user_code", userCode)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+func currentPublicCodexDeviceOAuth(now time.Time) (string, *sdkAuth.CodexDeviceFlow, bool) {
+	publicCodexDeviceMu.Lock()
+	current := publicCodexDeviceCurrent
+	if current == nil || current.flow == nil || !now.Before(current.expiresAt) {
+		publicCodexDeviceCurrent = nil
+		publicCodexDeviceMu.Unlock()
+		return "", nil, false
+	}
+	state := current.state
+	flow := current.flow
+	publicCodexDeviceMu.Unlock()
+
+	if !IsOAuthSessionPending(state, "codex") {
+		clearPublicCodexDeviceOAuth(state)
+		return "", nil, false
+	}
+
+	return state, flow, true
+}
+
+func setCurrentPublicCodexDeviceOAuth(state string, flow *sdkAuth.CodexDeviceFlow, now time.Time) {
+	publicCodexDeviceMu.Lock()
+	publicCodexDeviceCurrent = &publicCodexDeviceOAuthState{
+		state:     state,
+		flow:      flow,
+		expiresAt: now.Add(publicCodexDeviceFlowTTL),
+	}
+	publicCodexDeviceMu.Unlock()
+}
+
+func clearPublicCodexDeviceOAuth(state string) {
+	publicCodexDeviceMu.Lock()
+	if publicCodexDeviceCurrent != nil && publicCodexDeviceCurrent.state == state {
+		publicCodexDeviceCurrent = nil
+	}
+	publicCodexDeviceMu.Unlock()
+}
+
+func clearPublicCodexDeviceOAuthState() {
+	publicCodexDeviceMu.Lock()
+	publicCodexDeviceCurrent = nil
+	publicCodexDeviceBackoff = time.Time{}
+	publicCodexDeviceMu.Unlock()
+}
+
+func currentPublicCodexDeviceBackoff(now time.Time) (time.Time, bool) {
+	publicCodexDeviceMu.Lock()
+	until := publicCodexDeviceBackoff
+	if until.IsZero() || !now.Before(until) {
+		publicCodexDeviceBackoff = time.Time{}
+		publicCodexDeviceMu.Unlock()
+		return time.Time{}, false
+	}
+	publicCodexDeviceMu.Unlock()
+	return until, true
+}
+
+func setPublicCodexDeviceBackoff(now time.Time) time.Time {
+	until := now.Add(publicCodexDeviceChallengeBackoff)
+	publicCodexDeviceMu.Lock()
+	publicCodexDeviceBackoff = until
+	publicCodexDeviceMu.Unlock()
+	return until
+}
+
+func publicCodexDeviceChallengeResponse(until time.Time, now time.Time) gin.H {
+	retryAfter := int(time.Until(until).Seconds())
+	if !now.IsZero() {
+		retryAfter = int(until.Sub(now).Seconds())
+	}
+	if retryAfter < 1 {
+		retryAfter = 1
+	}
+	return gin.H{
+		"error":               publicCodexDeviceChallengeMessage,
+		"code":                publicCodexDeviceChallengeCode,
+		"retry_after_seconds": retryAfter,
+	}
 }
 
 func (h *Handler) ListAuthFiles(c *gin.Context) {
@@ -2026,6 +2201,160 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 }
 
 func (h *Handler) RequestCodexToken(c *gin.Context) {
+	publicBaseURL, err := codexPublicBaseURL(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	result, startErr := h.startCodexTokenFlow(c, publicBaseURL)
+	if startErr != nil {
+		c.JSON(startErr.status, gin.H{"error": startErr.message})
+		return
+	}
+	c.JSON(200, result.response())
+}
+
+func (h *Handler) StartPublicCodexOAuth(c *gin.Context, publicBaseURL string) {
+	publicBaseURL, err := parseCodexPublicBaseURL(publicBaseURL)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if publicBaseURL == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "public base URL unavailable"})
+		return
+	}
+
+	result, startErr := h.startCodexTokenFlow(c, publicBaseURL)
+	if startErr != nil {
+		c.JSON(startErr.status, gin.H{"error": startErr.message})
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.Redirect(http.StatusFound, result.URL)
+}
+
+func (h *Handler) StartPublicCodexDeviceOAuth(c *gin.Context) {
+	if h == nil || h.cfg == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler not initialized"})
+		return
+	}
+
+	publicCodexDeviceStartMu.Lock()
+	defer publicCodexDeviceStartMu.Unlock()
+
+	now := time.Now()
+	if state, deviceFlow, ok := currentPublicCodexDeviceOAuth(now); ok {
+		c.JSON(http.StatusOK, publicCodexDeviceOAuthResponse(state, deviceFlow))
+		return
+	}
+	if until, ok := currentPublicCodexDeviceBackoff(now); ok {
+		c.JSON(http.StatusTooManyRequests, publicCodexDeviceChallengeResponse(until, now))
+		return
+	}
+
+	ctx := PopulateAuthContext(context.Background(), c)
+	deviceFlow, err := startCodexDeviceFlow(ctx, h.cfg)
+	if err != nil {
+		if sdkAuth.IsCodexDeviceAuthChallenge(err) {
+			until := setPublicCodexDeviceBackoff(now)
+			log.Warnf("Codex device authentication challenged by OpenAI auth endpoint: %v", err)
+			c.JSON(http.StatusTooManyRequests, publicCodexDeviceChallengeResponse(until, now))
+			return
+		}
+		log.Errorf("Failed to start Codex device authentication: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start Codex device authentication"})
+		return
+	}
+
+	state, err := misc.GenerateRandomState()
+	if err != nil {
+		log.Errorf("Failed to generate state parameter: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
+		return
+	}
+	RegisterOAuthSession(state, "codex")
+	setCurrentPublicCodexDeviceOAuth(state, deviceFlow, now)
+
+	go h.waitForPublicCodexDeviceOAuth(state, deviceFlow)
+
+	c.JSON(http.StatusOK, publicCodexDeviceOAuthResponse(state, deviceFlow))
+}
+
+func publicCodexDeviceOAuthResponse(state string, deviceFlow *sdkAuth.CodexDeviceFlow) gin.H {
+	resp := gin.H{
+		"status":             "ok",
+		"state":              state,
+		"expires_in_seconds": int(publicCodexDeviceFlowTTL.Seconds()),
+	}
+	if deviceFlow != nil {
+		resp["user_code"] = deviceFlow.UserCode
+		resp["verification_url"] = deviceFlow.VerificationURL
+		resp["verification_url_complete"] = codexVerificationURLComplete(deviceFlow.VerificationURL, deviceFlow.UserCode)
+	}
+	return resp
+}
+
+func (h *Handler) waitForPublicCodexDeviceOAuth(state string, deviceFlow *sdkAuth.CodexDeviceFlow) {
+	defer clearPublicCodexDeviceOAuth(state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 16*time.Minute)
+	defer cancel()
+
+	bundle, err := pollCodexDeviceFlow(ctx, h.cfg, deviceFlow)
+	if err != nil {
+		SetOAuthSessionError(state, oauthSessionErrorWithCause("Codex device authentication failed", err))
+		log.Errorf("Codex device authentication failed: %v", err)
+		return
+	}
+
+	openaiAuth := codex.NewCodexAuth(h.cfg)
+	savedPath, err := h.saveCodexAuthBundle(ctx, openaiAuth, bundle)
+	if err != nil {
+		SetOAuthSessionError(state, "Failed to save authentication tokens")
+		log.Errorf("Failed to save authentication tokens: %v", err)
+		return
+	}
+
+	fmt.Printf("Codex device authentication successful! Token saved to %s\n", savedPath)
+	CompleteOAuthSession(state)
+}
+
+func (h *Handler) saveCodexAuthBundle(ctx context.Context, openaiAuth *codex.CodexAuth, bundle *codex.CodexAuthBundle) (string, error) {
+	if openaiAuth == nil {
+		return "", fmt.Errorf("codex auth service is nil")
+	}
+	if bundle == nil {
+		return "", fmt.Errorf("codex auth bundle is nil")
+	}
+
+	tokenStorage := openaiAuth.CreateTokenStorage(bundle)
+	planType := ""
+	hashAccountID := ""
+	if claims, _ := codex.ParseJWTToken(bundle.TokenData.IDToken); claims != nil {
+		planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+		if accountID := claims.GetAccountID(); accountID != "" {
+			digest := sha256.Sum256([]byte(accountID))
+			hashAccountID = hex.EncodeToString(digest[:])[:8]
+		}
+	}
+
+	fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
+	record := &coreauth.Auth{
+		ID:       fileName,
+		Provider: "codex",
+		FileName: fileName,
+		Storage:  tokenStorage,
+		Metadata: map[string]any{
+			"email":      tokenStorage.Email,
+			"account_id": tokenStorage.AccountID,
+		},
+	}
+	return h.saveTokenRecord(ctx, record)
+}
+
+func (h *Handler) startCodexTokenFlow(c *gin.Context, publicBaseURL string) (*codexOAuthStartResult, *codexOAuthStartError) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 
@@ -2035,45 +2364,53 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	pkceCodes, err := codex.GeneratePKCECodes()
 	if err != nil {
 		log.Errorf("Failed to generate PKCE codes: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PKCE codes"})
-		return
+		return nil, &codexOAuthStartError{status: http.StatusInternalServerError, message: "failed to generate PKCE codes"}
 	}
 
 	// Generate random state parameter
 	state, err := misc.GenerateRandomState()
 	if err != nil {
 		log.Errorf("Failed to generate state parameter: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
-		return
+		return nil, &codexOAuthStartError{status: http.StatusInternalServerError, message: "failed to generate state parameter"}
 	}
 
 	// Initialize Codex auth service
 	openaiAuth := codex.NewCodexAuth(h.cfg)
 
+	redirectURI := codex.RedirectURI
+	publicURL := ""
+	if publicBaseURL != "" {
+		redirectURI = joinPublicURL(publicBaseURL, "/codex/callback")
+		publicURL = joinPublicURL(publicBaseURL, "/codex/login/"+state)
+	}
+
 	// Generate authorization URL
-	authURL, err := openaiAuth.GenerateAuthURL(state, pkceCodes)
+	authURL, err := openaiAuth.GenerateAuthURLWithRedirect(state, redirectURI, pkceCodes)
 	if err != nil {
 		log.Errorf("Failed to generate authorization URL: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
-		return
+		return nil, &codexOAuthStartError{status: http.StatusInternalServerError, message: "failed to generate authorization url"}
 	}
 
 	RegisterOAuthSession(state, "codex")
+	if publicURL != "" {
+		RegisterOAuthSessionAuthURL(state, "codex", authURL)
+	}
 
 	isWebUI := isWebUIRequest(c)
+	if publicURL != "" {
+		isWebUI = false
+	}
 	var forwarder *callbackForwarder
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/codex/callback")
 		if errTarget != nil {
 			log.WithError(errTarget).Error("failed to compute codex callback target")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
-			return
+			return nil, &codexOAuthStartError{status: http.StatusInternalServerError, message: "callback server unavailable"}
 		}
 		var errStart error
 		if forwarder, errStart = startCallbackForwarder(codexCallbackPort, "codex", targetURL); errStart != nil {
 			log.WithError(errStart).Error("failed to start codex callback forwarder")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
-			return
+			return nil, &codexOAuthStartError{status: http.StatusInternalServerError, message: "failed to start callback server"}
 		}
 	}
 
@@ -2120,7 +2457,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 		log.Debug("Authorization code received, exchanging for tokens...")
 		// Exchange code for tokens using internal auth service
-		bundle, errExchange := openaiAuth.ExchangeCodeForTokens(ctx, code, pkceCodes)
+		bundle, errExchange := openaiAuth.ExchangeCodeForTokensWithRedirect(ctx, code, redirectURI, pkceCodes)
 		if errExchange != nil {
 			authErr := codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, errExchange)
 			SetOAuthSessionError(state, oauthSessionErrorWithCause("Failed to exchange authorization code for tokens", errExchange))
@@ -2128,32 +2465,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			return
 		}
 
-		// Extract additional info for filename generation
-		claims, _ := codex.ParseJWTToken(bundle.TokenData.IDToken)
-		planType := ""
-		hashAccountID := ""
-		if claims != nil {
-			planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
-			if accountID := claims.GetAccountID(); accountID != "" {
-				digest := sha256.Sum256([]byte(accountID))
-				hashAccountID = hex.EncodeToString(digest[:])[:8]
-			}
-		}
-
-		// Create token storage and persist
-		tokenStorage := openaiAuth.CreateTokenStorage(bundle)
-		fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
-		record := &coreauth.Auth{
-			ID:       fileName,
-			Provider: "codex",
-			FileName: fileName,
-			Storage:  tokenStorage,
-			Metadata: map[string]any{
-				"email":      tokenStorage.Email,
-				"account_id": tokenStorage.AccountID,
-			},
-		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		savedPath, errSave := h.saveCodexAuthBundle(ctx, openaiAuth, bundle)
 		if errSave != nil {
 			SetOAuthSessionError(state, "Failed to save authentication tokens")
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
@@ -2168,7 +2480,12 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		CompleteOAuthSessionsByProvider("codex")
 	}()
 
-	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
+	return &codexOAuthStartResult{
+		URL:         authURL,
+		State:       state,
+		PublicURL:   publicURL,
+		CallbackURL: redirectURI,
+	}, nil
 }
 
 func (h *Handler) RequestAntigravityToken(c *gin.Context) {

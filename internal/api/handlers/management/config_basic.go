@@ -326,3 +326,85 @@ func (h *Handler) DeleteProxyURL(c *gin.Context) {
 	h.cfg.ProxyURL = ""
 	h.persist(c)
 }
+
+// ProxySettings (rich global proxy with on/off + protocol + credentials)
+// These endpoints allow external shortcuts and the Web-UI to control the
+// outbound proxy in a structured way without restarting the server.
+// Full object can be sent, or only the fields that should change (PATCH).
+
+type proxySettingsBody struct {
+	Enabled  *bool   `json:"enabled,omitempty"`
+	Protocol *string `json:"protocol,omitempty"`
+	Host     *string `json:"host,omitempty"`
+	Port     *int    `json:"port,omitempty"`
+	Username *string `json:"username,omitempty"`
+	Password *string `json:"password,omitempty"`
+}
+
+func (h *Handler) GetProxySettings(c *gin.Context) {
+	ps := h.cfg.ProxySettings
+	c.JSON(200, gin.H{
+		"enabled":  ps.Enabled,
+		"protocol": ps.Protocol,
+		"host":     ps.Host,
+		"port":     ps.Port,
+		"username": ps.Username,
+		// Note: password is returned for round-tripping in trusted management UI.
+		// The management API itself is authenticated.
+		"password":  ps.Password,
+		"proxy-url": h.cfg.EffectiveProxyURL(),
+	})
+}
+
+func (h *Handler) PutProxySettings(c *gin.Context) {
+	var body proxySettingsBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+
+	// Full replace semantics for PUT
+	h.cfg.ProxySettings = config.ProxySettings{}
+	applyProxySettingsPatch(&h.cfg.ProxySettings, body)
+
+	h.cfg.ProxyURL = h.cfg.EffectiveProxyURL()
+	h.persist(c)
+	c.JSON(200, gin.H{"ok": true, "proxy-url": h.cfg.ProxyURL})
+}
+
+func (h *Handler) PatchProxySettings(c *gin.Context) {
+	var body proxySettingsBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+
+	applyProxySettingsPatch(&h.cfg.ProxySettings, body)
+
+	h.cfg.ProxyURL = h.cfg.EffectiveProxyURL()
+	h.persist(c)
+	c.JSON(200, gin.H{"ok": true, "proxy-url": h.cfg.ProxyURL})
+}
+
+// applyProxySettingsPatch merges only the non-nil fields from body into target.
+// This enables both "full update" (via PUT after zeroing) and "partial / on-off only" updates via PATCH.
+func applyProxySettingsPatch(target *config.ProxySettings, body proxySettingsBody) {
+	if body.Enabled != nil {
+		target.Enabled = *body.Enabled
+	}
+	if body.Protocol != nil {
+		target.Protocol = strings.TrimSpace(*body.Protocol)
+	}
+	if body.Host != nil {
+		target.Host = strings.TrimSpace(*body.Host)
+	}
+	if body.Port != nil {
+		target.Port = *body.Port
+	}
+	if body.Username != nil {
+		target.Username = *body.Username
+	}
+	if body.Password != nil {
+		target.Password = *body.Password
+	}
+}

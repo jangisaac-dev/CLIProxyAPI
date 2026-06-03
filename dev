@@ -1,0 +1,79 @@
+#!/bin/bash
+#
+# dev - CLIProxyAPI Development Environment Manager
+#
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DEV_SCRIPTS_DIR="$SCRIPT_DIR/scripts/dev-8317"
+DEV_RUNTIME_DIR="${CLIPROXY_DEV_RUNTIME_DIR:-$HOME/.local/share/cliproxyapi/dev-8317}"
+DEV_LABEL="local.cli-proxy-api-dev"
+DEV_DOMAIN="gui/$(id -u)"
+
+print_help() {
+    cat << 'HELP'
+dev - CLIProxyAPI Development Manager
+
+Usage:
+  ./dev <command>
+
+Commands:
+  start       Start the 8317 dev instance
+  stop        Stop the 8317 dev instance
+  restart     Restart the 8317 dev instance
+  update      Update the feature branch (rebase on latest main)
+  upgrade     Full upgrade (rebase + rebuild + restart)
+  status      Show current status
+  logs        Follow the logs (tail -f)
+  help        Show this help
+
+Examples:
+  ./dev start
+  ./dev upgrade
+  ./dev status
+HELP
+}
+
+case "${1:-help}" in
+    start)
+        exec "$DEV_SCRIPTS_DIR/dev-start.sh"
+        ;;
+    stop)
+        exec "$DEV_SCRIPTS_DIR/dev-stop.sh"
+        ;;
+    restart)
+        exec "$DEV_SCRIPTS_DIR/dev-restart.sh"
+        ;;
+    update)
+        exec "$DEV_SCRIPTS_DIR/dev-update.sh"
+        ;;
+    upgrade)
+        exec "$DEV_SCRIPTS_DIR/dev-upgrade.sh"
+        ;;
+    status)
+        echo "=== CLIProxyAPI Dev (8317) Status ==="
+        if launchctl print "$DEV_DOMAIN/$DEV_LABEL" >/dev/null 2>&1; then
+            echo "✅ LaunchAgent loaded"
+        else
+            echo "❌ LaunchAgent not loaded"
+        fi
+
+        if lsof -i :8317 -sTCP:LISTEN -n -P 2>/dev/null | grep -q LISTEN; then
+            echo "✅ Port 8317 listening"
+        else
+            echo "❌ Port 8317 not listening"
+        fi
+        ;;
+    logs)
+        tail -f "$DEV_RUNTIME_DIR/launchd.log"
+        ;;
+    help|-h|--help)
+        print_help
+        ;;
+    *)
+        echo "Unknown command: $1"
+        print_help
+        exit 1
+        ;;
+esac

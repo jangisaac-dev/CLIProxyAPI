@@ -25,6 +25,7 @@ var (
 type oauthSession struct {
 	Provider  string
 	Status    string
+	AuthURL   string
 	CreatedAt time.Time
 	ExpiresAt time.Time
 }
@@ -97,6 +98,31 @@ func (s *oauthSessionStore) SetError(state, message string) {
 	s.sessions[state] = session
 }
 
+func (s *oauthSessionStore) SetAuthURL(state, provider, authURL string) bool {
+	state = strings.TrimSpace(state)
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	authURL = strings.TrimSpace(authURL)
+	if state == "" || provider == "" || authURL == "" {
+		return false
+	}
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.purgeExpiredLocked(now)
+	session, ok := s.sessions[state]
+	if !ok || session.Status != "" {
+		return false
+	}
+	if !strings.EqualFold(session.Provider, provider) {
+		return false
+	}
+	session.AuthURL = authURL
+	s.sessions[state] = session
+	return true
+}
+
 func (s *oauthSessionStore) Complete(state string) {
 	state = strings.TrimSpace(state)
 	if state == "" {
@@ -144,6 +170,28 @@ func (s *oauthSessionStore) Get(state string) (oauthSession, bool) {
 	return session, ok
 }
 
+func (s *oauthSessionStore) GetAuthURL(state, provider string) (string, bool) {
+	state = strings.TrimSpace(state)
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.purgeExpiredLocked(now)
+	session, ok := s.sessions[state]
+	if !ok || session.Status != "" {
+		return "", false
+	}
+	if provider != "" && !strings.EqualFold(session.Provider, provider) {
+		return "", false
+	}
+	if strings.TrimSpace(session.AuthURL) == "" {
+		return "", false
+	}
+	return session.AuthURL, true
+}
+
 func (s *oauthSessionStore) IsPending(state, provider string) bool {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
@@ -172,6 +220,10 @@ func RegisterOAuthSession(state, provider string) { oauthSessions.Register(state
 
 func SetOAuthSessionError(state, message string) { oauthSessions.SetError(state, message) }
 
+func RegisterOAuthSessionAuthURL(state, provider, authURL string) bool {
+	return oauthSessions.SetAuthURL(state, provider, authURL)
+}
+
 func CompleteOAuthSession(state string) { oauthSessions.Complete(state) }
 
 func CompleteOAuthSessionsByProvider(provider string) int {
@@ -184,6 +236,10 @@ func GetOAuthSession(state string) (provider string, status string, ok bool) {
 		return "", "", false
 	}
 	return session.Provider, session.Status, true
+}
+
+func GetOAuthSessionAuthURL(state, provider string) (string, bool) {
+	return oauthSessions.GetAuthURL(state, provider)
 }
 
 func IsOAuthSessionPending(state, provider string) bool {
