@@ -43,6 +43,9 @@ type Config struct {
 	// RemoteManagement nests management-related options under 'remote-management'.
 	RemoteManagement RemoteManagement `yaml:"remote-management" json:"-"`
 
+	// DuckDNS stores optional Dynamic DNS update settings for the management UI.
+	DuckDNS DuckDNSConfig `yaml:"duckdns,omitempty" json:"-"`
+
 	// AuthDir is the directory where authentication token files are stored.
 	AuthDir string `yaml:"auth-dir" json:"-"`
 
@@ -204,6 +207,13 @@ type RemoteManagement struct {
 	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
 	// Accepts either a repository URL (https://github.com/org/repo) or an API releases endpoint.
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
+}
+
+// DuckDNSConfig stores DuckDNS update settings.
+type DuckDNSConfig struct {
+	Domain string `yaml:"domain" json:"domain"`
+	Token  string `yaml:"token" json:"-"`
+	IP     string `yaml:"ip,omitempty" json:"ip,omitempty"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	gin "github.com/gin-gonic/gin"
+	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
@@ -172,6 +173,135 @@ func TestHomeEnabledHidesManagementEndpointsAndControlPanel(t *testing.T) {
 			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusNotFound, rr.Body.String())
 		}
 	})
+}
+
+func TestManagementControlPanelInjectsDuckDNSPanel(t *testing.T) {
+	staticDir := t.TempDir()
+	t.Setenv("MANAGEMENT_STATIC_PATH", staticDir)
+	if err := os.WriteFile(filepath.Join(staticDir, "management.html"), []byte("<!doctype html><html><body><main>panel</main></body></html>"), 0o600); err != nil {
+		t.Fatalf("write management panel: %v", err)
+	}
+
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/management.html", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "<main>panel</main>") {
+		t.Fatalf("original management panel content missing: %s", body)
+	}
+	if !strings.Contains(body, "cliproxy-duckdns-root") {
+		t.Fatalf("DuckDNS panel injection missing: %s", body)
+	}
+	if strings.Contains(body, "position:fixed") {
+		t.Fatalf("DuckDNS panel should not be injected as a floating panel: %s", body)
+	}
+	if strings.Contains(body, "Management key") || strings.Contains(body, "cliproxy-duckdns-key") {
+		t.Fatalf("DuckDNS panel should not ask for a management key: %s", body)
+	}
+	if !strings.Contains(body, "/v0/management/duckdns/update") {
+		t.Fatalf("DuckDNS update endpoint missing from injected panel: %s", body)
+	}
+	if !strings.Contains(body, "/v0/management/duckdns/public-ip") {
+		t.Fatalf("DuckDNS public IP endpoint missing from injected panel: %s", body)
+	}
+	if !strings.Contains(body, `defaultDuckDNSDomain = "iscdx"`) {
+		t.Fatalf("DuckDNS default subname missing from injected panel: %s", body)
+	}
+	if !strings.Contains(body, `ensureMount`) {
+		t.Fatalf("DuckDNS panel should be mounted into the existing app flow: %s", body)
+	}
+	if strings.Contains(body, `document.getElementById("root")`) {
+		t.Fatalf("DuckDNS panel should not fall back to the app root outside the existing content flow: %s", body)
+	}
+}
+
+func TestPublicCodexLoginRedirectsRegisteredExternalAuthURL(t *testing.T) {
+	server := newTestServer(t)
+
+	state := "public-codex-state"
+	authURL := "https://auth.openai.com/oauth/authorize?state=" + state
+	managementHandlers.RegisterOAuthSession(state, "codex")
+	managementHandlers.RegisterOAuthSessionAuthURL(state, "codex", authURL)
+	defer managementHandlers.CompleteOAuthSession(state)
+
+	req := httptest.NewRequest(http.MethodGet, "/codex/login/"+state, nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusFound, rr.Body.String())
+	}
+	if got := rr.Header().Get("Location"); got != authURL {
+		t.Fatalf("Location = %q, want %q", got, authURL)
+	}
+}
+
+func TestPublicCodexLoginRejectsUnknownState(t *testing.T) {
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/codex/login/missing-state", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusNotFound, rr.Body.String())
+	}
+}
+
+func TestPublicCodexOAuthPageIsAccessibleWithoutManagementAuth(t *testing.T) {
+	server := newTestServer(t)
+
+	for _, target := range []string{
+		"https://iscdx.duckdns.org:8317/codex/oauth",
+		"https://cpa.ioq.kr/codex/auth",
+	} {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, want %d body=%s", target, rr.Code, http.StatusOK, rr.Body.String())
+		}
+		if got := rr.Header().Get("Content-Type"); !strings.Contains(got, "text/html") {
+			t.Fatalf("%s Content-Type = %q, want text/html", target, got)
+		}
+		if !strings.Contains(rr.Body.String(), "/codex/oauth/device/start") {
+			t.Fatalf("%s page body does not contain public start route: %s", target, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), `id="copy"`) {
+			t.Fatalf("%s page body does not contain copy button: %s", target, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "navigator.clipboard") {
+			t.Fatalf("%s page body does not contain clipboard copy support: %s", target, rr.Body.String())
+		}
+	}
+}
+
+func TestPublicCodexOAuthStartDoesNotUseUnsupportedWebRedirect(t *testing.T) {
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "https://iscdx.duckdns.org:8317/codex/oauth/start", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if location := rr.Header().Get("Location"); strings.Contains(location, "oauth/authorize") {
+		t.Fatalf("Location = %q, should not use unsupported web OAuth redirect", location)
+	}
+	if strings.Contains(rr.Body.String(), "oauth/authorize") {
+		t.Fatalf("page body should not contain unsupported web OAuth URL: %s", rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "/codex/oauth/device/start") {
+		t.Fatalf("page body does not contain device start route: %s", rr.Body.String())
+	}
 }
 
 func TestAmpProviderModelRoutes(t *testing.T) {

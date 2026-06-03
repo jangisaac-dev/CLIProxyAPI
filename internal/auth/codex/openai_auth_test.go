@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -76,5 +77,26 @@ func TestNewCodexAuthWithProxyURL_OverrideProxyTakesPrecedence(t *testing.T) {
 	}
 	if proxyURL == nil || proxyURL.String() != "http://override.example.com:8081" {
 		t.Fatalf("proxy URL = %v, want http://override.example.com:8081", proxyURL)
+	}
+}
+
+func TestGenerateAuthURLWithRedirectUsesCallerRedirectURI(t *testing.T) {
+	auth := NewCodexAuth(nil)
+	pkceCodes := &PKCECodes{
+		CodeChallenge: "challenge",
+		CodeVerifier:  "verifier",
+	}
+
+	authURL, err := auth.GenerateAuthURLWithRedirect("state-1", "http://iscdx.duckdns.org:8317/codex/callback", pkceCodes)
+	if err != nil {
+		t.Fatalf("GenerateAuthURLWithRedirect returned error: %v", err)
+	}
+
+	parsed, errParse := url.Parse(authURL)
+	if errParse != nil {
+		t.Fatalf("parse auth URL: %v", errParse)
+	}
+	if got := parsed.Query().Get("redirect_uri"); got != "http://iscdx.duckdns.org:8317/codex/callback" {
+		t.Fatalf("redirect_uri = %q, want external callback", got)
 	}
 }
